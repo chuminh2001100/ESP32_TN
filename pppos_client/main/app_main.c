@@ -11,6 +11,12 @@
 #include "bg96.h"
 #include "sim7672.h"
 
+#include "lwip/err.h"
+#include "lwip/sockets.h"
+#include "lwip/sys.h"
+#include "lwip/netdb.h"
+#include "lwip/dns.h"
+
 #define mqtt_broker "mqtt://demo.thingsboard.io:1883"
 
 static const char *TAG = "pppos_example";
@@ -18,12 +24,59 @@ static EventGroupHandle_t event_group = NULL;
 static const int CONNECT_BIT = BIT0;
 static const int STOP_BIT = BIT1;
 static const int GOT_DATA_BIT = BIT2;
+int count_login = 0;
 
 char status_topic[] = "v1/devices/me/telemetry";
 char tmp[100];
 
 #define SIM_POWER_TX_PIN            11
 #define SIM_POWER_RX_PIN            12
+#define PORT                        8964
+#define HOST_IP_ADDR                "116.101.122.190"
+
+char payload_login[] = "24240000140026092322284786418005181236605648542e312e303113dd014dc200d66c2323";
+char payload_data[] = "2424ff003c00260923222847210826401055688618060a020400000000006c05000000000020030f9800011522000000000000000000000000000000000000000000000000000000240048e72323";
+
+int HexDigit(char c)
+{
+  if (c >= '0' && c <= '9')
+    return c - '0';
+
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+
+  return 0;
+}
+
+char HexByte(char *p)
+{
+  char value = 0;
+
+  value += HexDigit(*p++);
+
+  if (*p != '\0')
+  {
+    value = value * 16 +  HexDigit(*p);
+  }
+  return value;
+}
+
+void hextoString_byme(char *hex, char *result){
+    memset(result,0,strlen(result));
+	int i = 0;
+	int hexLength = strlen(hex);
+	if (hexLength % 2 != 0) {
+        printf("Invalid hex string length\n");
+        return;
+    }
+    
+    for (i = 0; i < hexLength; i += 2){
+    	*(result + i/2) = HexByte(&hex[i]);
+	}	
+}
 
 #if CONFIG_EXAMPLE_SEND_MSG
 /**
@@ -106,6 +159,80 @@ err:
     return ESP_FAIL;
 }
 #endif
+
+static void tcp_client_task(void *pvParameters)
+{
+    char rx_buffer[128];
+    char buffer_login[100];
+    char host_ip[] = HOST_IP_ADDR;
+    int addr_family = 0;
+    int ip_protocol = 0;
+
+    while (1) {
+        struct sockaddr_in dest_addr;
+        dest_addr.sin_addr.s_addr = inet_addr(host_ip);
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(PORT);
+        addr_family = AF_INET;
+        ip_protocol = IPPROTO_IP;
+
+        int sock =  socket(addr_family, SOCK_STREAM, ip_protocol);
+        if (sock < 0) {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            break;
+        }
+        ESP_LOGI(TAG, "Socket created, connecting to %s:%d", host_ip, PORT);
+
+        int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(struct sockaddr_in6));
+        if (err != 0) {
+            ESP_LOGE(TAG, "Socket unable to connect: errno %d", errno);
+            break;
+        }
+        ESP_LOGI(TAG, "Successfully connected");
+
+        while (1) {
+            if(count_login == 0){
+                hextoString_byme(payload_login,buffer_login);
+                int err = send(sock, buffer_login, strlen(payload_login), 0);
+                if (err < 0) {
+                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    break;
+                }
+                vTaskDelay(10 / portTICK_PERIOD_MS);
+                int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+                // Error occurred during receiving
+                if (len < 0) {
+                    ESP_LOGE(TAG, "recv failed: errno %d", errno);
+                    break;
+                }
+                // Data received
+                else {
+                    rx_buffer[len] = 0; // Null-terminate whatever we received and treat like a string
+                    ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
+                    ESP_LOGI(TAG, "%s", rx_buffer);
+                    count_login = 1;
+                }
+            }
+            else{
+                printf("Task send data position\r\n");
+                hextoString_byme(payload_data,buffer_login);
+                int err = send(sock, buffer_login, strlen(payload_login), 0);
+                if (err < 0) {
+                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    break;
+                }
+            }
+            vTaskDelay(2000 / portTICK_PERIOD_MS);
+        }
+
+        if (sock != -1) {
+            ESP_LOGE(TAG, "Shutting down socket and restarting...");
+            shutdown(sock, 0);
+            close(sock);
+        }
+    }
+    vTaskDelete(NULL);
+}
 
 static void modem_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -269,20 +396,21 @@ void app_main(void)
     /* Wait for IP address */
     xEventGroupWaitBits(event_group, CONNECT_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
     /* Config MQTT */
-    esp_mqtt_client_config_t mqtt_config = {
-        .uri = mqtt_broker,
-        .password = NULL,
-        .username = "6p04srNcOITqqM9QT8GX",
-        .event_handle = mqtt_event_handler,
-    };
-    esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_config);
-    esp_mqtt_client_start(mqtt_client);
+    // esp_mqtt_client_config_t mqtt_config = {
+    //     .uri = mqtt_broker,
+    //     .password = NULL,
+    //     .username = "6p04srNcOITqqM9QT8GX",
+    //     .event_handle = mqtt_event_handler,
+    // };
+    // esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_config);
+    // esp_mqtt_client_start(mqtt_client);
+    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
     while(1)
     {
-        sprintf(tmp,"{\"led\": %d,\"status\": \"%d\"}", 2, 8);
+        // sprintf(tmp,"{\"led\": %d,\"status\": \"%d\"}", 2, 8);
         printf("API TEST\r\n");
-        int msg_id = esp_mqtt_client_publish(mqtt_client, status_topic, tmp, 0, 0, 1);
-        ESP_LOGI(TAG, "Sent publish successful, msg_id=%d", msg_id);
+        // int msg_id = esp_mqtt_client_publish(mqtt_client, status_topic, tmp, 0, 0, 1);
+        // ESP_LOGI(TAG, "Sent publish successful, msg_id=%d", msg_id);
         vTaskDelay(200);
     }
 //     xEventGroupWaitBits(event_group, GOT_DATA_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
